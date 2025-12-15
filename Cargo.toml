@@ -2,6 +2,12 @@
 name = "just-fancy"
 version = "0.1.0"
 edition = "2021"
+description = "A fancy wrapper for just with parallel execution and pretty output"
+license = "MIT"
+repository = "https://github.com/samgqroberts/just-fancy"
+readme = "README.md"
+keywords = ["just", "task-runner", "cli", "parallel", "justfile"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
