@@ -1,6 +1,6 @@
 [package]
 name = "just-fancy"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A fancy wrapper for just with parallel execution and pretty output"
 license = "MIT"

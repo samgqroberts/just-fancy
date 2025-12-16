@@ -259,7 +259,6 @@ impl Executor {
                 };
 
                 tokio::spawn(async move {
-                    let task_start = Instant::now();
                     let result = run_recipe(
                         &recipe,
                         justfile_path.as_deref(),
@@ -268,7 +267,9 @@ impl Executor {
                         event_tx.clone(),
                     )
                     .await;
-                    let duration = task_start.elapsed();
+
+                    // Extract duration from result, or use zero on error
+                    let duration = result.as_ref().map(|(_, d)| *d).unwrap_or(Duration::ZERO);
 
                     // Calculate total duration (from when deps were satisfied)
                     let total_duration = {
@@ -282,7 +283,7 @@ impl Executor {
 
                     // Update state
                     let new_state = match result {
-                        Ok(true) => TaskState::Completed {
+                        Ok((true, _)) => TaskState::Completed {
                             duration,
                             total_duration,
                         },
@@ -321,13 +322,15 @@ impl Executor {
 }
 
 /// Run a single recipe and capture its output
+/// Returns (success, duration)
 async fn run_recipe(
     recipe: &str,
     justfile_path: Option<&str>,
     working_dir: Option<&str>,
     args: &[String],
     event_tx: mpsc::Sender<ExecutorEvent>,
-) -> Result<bool> {
+) -> Result<(bool, Duration)> {
+    let task_start = Instant::now();
     let mut cmd = Command::new("just");
 
     if let Some(path) = justfile_path {
@@ -417,8 +420,11 @@ async fn run_recipe(
     let _ = stdout_handle.await;
     let _ = stderr_handle.await;
 
-    // Write log file
-    collector.lock().await.write_log()?;
+    let success = status.success();
+    let duration = task_start.elapsed();
 
-    Ok(status.success())
+    // Write log file with metadata
+    collector.lock().await.write_log(success, duration)?;
+
+    Ok((success, duration))
 }

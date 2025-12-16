@@ -2,6 +2,20 @@ use anyhow::Result;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+/// Get the current timestamp in a human-readable format
+fn current_timestamp() -> String {
+    // Use the `date` command for a portable timestamp
+    Command::new("date")
+        .arg("+%Y-%m-%d %H:%M:%S %z")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 /// Maximum visible characters to show in output preview
 pub const MAX_PREVIEW_CHARS: usize = 50;
@@ -48,6 +62,8 @@ pub struct OutputCollector {
     latest_line: String,
     /// Recipe name (for log file)
     recipe_name: String,
+    /// Timestamp when the task started (RFC 3339 format)
+    start_time: String,
 }
 
 impl OutputCollector {
@@ -57,6 +73,7 @@ impl OutputCollector {
             buffer: Vec::new(),
             latest_line: String::new(),
             recipe_name: recipe_name.to_string(),
+            start_time: current_timestamp(),
         }
     }
 
@@ -81,13 +98,24 @@ impl OutputCollector {
         extract_preview(&self.latest_line, MAX_PREVIEW_CHARS)
     }
 
-    /// Write the full output to a log file
-    pub fn write_log(&self) -> Result<()> {
+    /// Write the full output to a log file with metadata header
+    pub fn write_log(&self, success: bool, duration: Duration) -> Result<()> {
         let log_dir = Path::new(LOG_DIR);
         fs::create_dir_all(log_dir)?;
 
         let log_path = log_dir.join(format!("{}.log", self.recipe_name));
         let mut file = File::create(&log_path)?;
+
+        // Write metadata header
+        let status = if success { "success" } else { "failed" };
+        let duration_secs = duration.as_secs_f64();
+        let header = format!(
+            "# just-fancy log\n# recipe: {}\n# started: {}\n# status: {}\n# duration: {:.2}s\n\n",
+            self.recipe_name, self.start_time, status, duration_secs
+        );
+        file.write_all(header.as_bytes())?;
+
+        // Write captured output
         file.write_all(&self.buffer)?;
 
         Ok(())
