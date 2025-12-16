@@ -2,6 +2,8 @@
 
 A fancy wrapper for [just](https://github.com/casey/just) with parallel execution and pretty output.
 
+https://github.com/user-attachments/assets/ffee412b-c608-4092-83d0-554ddb6c30bc
+
 ## Features
 
 - **Parallel execution** - Runs independent recipes concurrently, respecting dependencies
