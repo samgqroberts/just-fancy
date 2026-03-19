@@ -6,13 +6,14 @@ mod ui;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::executor::Executor;
 use crate::graph::RecipeGraph;
 use crate::justfile::JustDump;
-use crate::ui::UI;
+use crate::ui::AnyUI;
 
 /// A fancy wrapper for just with parallel execution and pretty output
 #[derive(Parser, Debug)]
@@ -39,9 +40,13 @@ struct Args {
     #[arg(short = 'l', long)]
     list: bool,
 
-    /// Disable fancy output, stream directly
+    /// Run just directly without parallel execution or output capture (passthrough mode)
     #[arg(long)]
     no_capture: bool,
+
+    /// Disable fancy output, use plain line-based status (auto-enabled when stdout is not a TTY)
+    #[arg(long)]
+    plain: bool,
 }
 
 #[tokio::main]
@@ -98,8 +103,15 @@ async fn main() -> Result<()> {
     // Get execution order for UI setup
     let recipes = graph.execution_order()?;
 
+    // Use plain output when stdout is not a TTY or when explicitly requested
+    let is_plain = args.plain || !std::io::stdout().is_terminal();
+
     // Create UI
-    let ui = UI::new(&recipes);
+    let ui = if is_plain {
+        AnyUI::Plain(crate::ui::PlainUI::new(&recipes))
+    } else {
+        AnyUI::Fancy(crate::ui::UI::new(&recipes))
+    };
 
     // Create executor
     let max_jobs = args.jobs.unwrap_or_else(num_cpus::get);

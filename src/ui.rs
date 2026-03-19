@@ -6,6 +6,109 @@ use tokio::sync::mpsc;
 use crate::executor::{ExecutorEvent, TaskState, TaskStatus};
 use crate::output::LOG_DIR;
 
+/// Plain line-based UI for non-TTY environments (CI, agents, pipes).
+///
+/// Unlike `--no-capture`, this mode still runs recipes in parallel and captures
+/// their output to log files — it just replaces the indicatif spinner UI with
+/// simple `println!` lines so that output is legible when stdout is not a TTY.
+pub struct PlainUI;
+
+impl PlainUI {
+    pub fn new(_recipes: &[String]) -> Self {
+        Self
+    }
+
+    /// Run the plain UI event loop, processing events from the executor.
+    /// Returns (success_count, failed_count, total_duration).
+    pub async fn run(
+        &self,
+        mut event_rx: mpsc::Receiver<ExecutorEvent>,
+    ) -> (usize, usize, Duration) {
+        let mut success_count = 0;
+        let mut failed_count = 0;
+        let mut total_duration = Duration::ZERO;
+
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                ExecutorEvent::TaskUpdated(status) => {
+                    self.print_status(&status);
+                }
+                // Ignore output events — would flood plain output
+                ExecutorEvent::TaskOutput { .. } => {}
+                ExecutorEvent::AllDone {
+                    success,
+                    failed,
+                    total_duration: duration,
+                } => {
+                    success_count = success;
+                    failed_count = failed;
+                    total_duration = duration;
+                    break;
+                }
+            }
+        }
+
+        (success_count, failed_count, total_duration)
+    }
+
+    fn print_status(&self, status: &TaskStatus) {
+        match &status.state {
+            // Waiting is noise in a plain log — skip it
+            TaskState::Waiting => {}
+            TaskState::Running => {
+                println!("[{}] started", status.recipe);
+            }
+            TaskState::Completed {
+                duration,
+                total_duration,
+            } => match total_duration {
+                Some(total) => println!(
+                    "[{}] completed in {:.1}s ({:.1}s total)",
+                    status.recipe,
+                    duration.as_secs_f64(),
+                    total.as_secs_f64()
+                ),
+                None => println!(
+                    "[{}] completed in {:.1}s",
+                    status.recipe,
+                    duration.as_secs_f64()
+                ),
+            },
+            TaskState::Failed { duration } => {
+                println!(
+                    "[{}] FAILED in {:.1}s (see {}/{}.log)",
+                    status.recipe,
+                    duration.as_secs_f64(),
+                    LOG_DIR,
+                    status.recipe
+                );
+            }
+            TaskState::Skipped { failed_dep } => {
+                println!("[{}] skipped ({} failed)", status.recipe, failed_dep);
+            }
+        }
+    }
+}
+
+/// Dispatch wrapper that selects between the fancy indicatif UI and the plain
+/// line-based UI without requiring an async trait.
+pub enum AnyUI {
+    Fancy(UI),
+    Plain(PlainUI),
+}
+
+impl AnyUI {
+    pub async fn run(
+        self,
+        event_rx: mpsc::Receiver<ExecutorEvent>,
+    ) -> (usize, usize, Duration) {
+        match self {
+            AnyUI::Fancy(ui) => ui.run(event_rx).await,
+            AnyUI::Plain(ui) => ui.run(event_rx).await,
+        }
+    }
+}
+
 /// UI manager using indicatif
 pub struct UI {
     /// Multi-progress container (kept alive so progress bars render correctly)
