@@ -115,8 +115,9 @@ impl OutputCollector {
         );
         file.write_all(header.as_bytes())?;
 
-        // Write captured output
-        file.write_all(&self.buffer)?;
+        // Write captured output with ANSI codes stripped
+        let stripped = strip_ansi_escapes::strip(&self.buffer);
+        file.write_all(&stripped)?;
 
         Ok(())
     }
@@ -185,6 +186,29 @@ mod tests {
         assert_eq!(preview.chars().count(), 51); // 50 + ellipsis
         assert!(preview.ends_with('…'));
         assert!(!preview.contains('\x1b')); // No ANSI codes in output
+    }
+
+    #[test]
+    fn test_write_log_strips_ansi() {
+        let mut collector = OutputCollector::new("test-ansi-strip");
+        collector.append(b"\x1b[32mgreen line\x1b[0m\n");
+        collector.append(b"\x1b[1;31;40mbold red\x1b[0m and plain\n");
+
+        collector
+            .write_log(true, Duration::from_secs(1))
+            .expect("write_log should succeed");
+
+        let log_path = Path::new(LOG_DIR).join("test-ansi-strip.log");
+        let contents = fs::read_to_string(&log_path).expect("log file should exist");
+        fs::remove_file(&log_path).ok();
+
+        assert!(
+            !contents.contains('\x1b'),
+            "log file should not contain ANSI escape codes, but got:\n{}",
+            contents
+        );
+        assert!(contents.contains("green line"));
+        assert!(contents.contains("bold red and plain"));
     }
 
     #[test]
