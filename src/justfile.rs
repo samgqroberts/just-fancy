@@ -109,138 +109,89 @@ impl JustDump {
             self.recipes.insert(recipe.namepath.clone(), recipe);
         }
 
-        // Resolve short dependency names to full namepaths
+        // Resolve short dependency names to full namepaths.
+        //
+        // Strategy: use source file as the primary resolution mechanism when
+        // available, since the JSON dump loses module qualifiers. Fall back to
+        // heuristic resolution (sibling/child module search) when source isn't
+        // available (e.g., in tests with synthetic data).
         let all_keys: Vec<String> = self.recipes.keys().cloned().collect();
 
         for recipe in self.recipes.values_mut() {
-            let mut new_deps: Vec<Dependency> = Vec::new();
+            let prefix = if recipe.namepath.contains("::") {
+                recipe.namepath.rsplitn(2, "::").nth(1).unwrap_or("")
+            } else {
+                ""
+            };
 
-            // Group consecutive deps by short name to handle duplicates
-            let mut i = 0;
-            while i < recipe.dependencies.len() {
-                let dep_name = &recipe.dependencies[i].recipe;
+            // Try source-based resolution first: read the justfile source and
+            // match each JSON dep positionally to the source dep list.
+            let source_path = source_paths.get(prefix);
+            let source_deps =
+                source_path.and_then(|p| Self::parse_deps_from_source(p, &recipe.name));
 
-                // Count how many consecutive deps share this name
-                let mut count = 1;
-                while i + count < recipe.dependencies.len()
-                    && recipe.dependencies[i + count].recipe == *dep_name
-                {
-                    count += 1;
-                }
-
-                // Check if it's an exact match to an existing recipe that isn't self-referential
-                if count == 1 && all_keys.contains(dep_name) && *dep_name != recipe.namepath {
-                    new_deps.push(recipe.dependencies[i].clone());
-                    i += 1;
+            if let Some(ref qualified_deps) = source_deps {
+                if qualified_deps.len() == recipe.dependencies.len() {
+                    // Positional match: JSON deps[i] corresponds to source deps[i]
+                    for (dep, source_dep) in
+                        recipe.dependencies.iter_mut().zip(qualified_deps.iter())
+                    {
+                        if source_dep.contains("::") {
+                            // Qualified relative to the module, e.g. "wasm::build-debug"
+                            dep.recipe = if prefix.is_empty() {
+                                source_dep.clone()
+                            } else {
+                                format!("{}::{}", prefix, source_dep)
+                            };
+                        } else if !all_keys.contains(&dep.recipe) || dep.recipe == recipe.namepath
+                        {
+                            // Short name that needs resolution — try sibling/child heuristic
+                            let resolved = Self::resolve_dep_heuristic(
+                                &dep.recipe,
+                                prefix,
+                                &all_keys,
+                            );
+                            if let Some(namepath) = resolved {
+                                dep.recipe = namepath;
+                            }
+                        }
+                    }
                     continue;
                 }
+            }
 
-                // Find all candidate namepaths for this short name.
-                //
-                // Resolution strategy (mirrors `just`'s scoping rules):
-                //   1. Sibling: {prefix}::{dep_name} (same module)
-                //   2. Direct child modules: {prefix}::*::{dep_name} (one level deeper)
-                // For root recipes the prefix is empty, so we search *::{dep_name}
-                // at one level deep, then **::{dep_name} is NOT searched (too ambiguous).
-                let suffix = format!("::{}", dep_name);
-                let candidates: Vec<String> = if recipe.namepath.contains("::") {
-                    let prefix = recipe.namepath.rsplitn(2, "::").nth(1).unwrap_or("");
-                    // Try sibling first
-                    let sibling = format!("{}{}", prefix, suffix);
-                    if all_keys.contains(&sibling) {
-                        vec![sibling]
-                    } else {
-                        // Search direct child modules: {prefix}::*::{dep_name}
-                        all_keys
-                            .iter()
-                            .filter(|np| {
-                                np.ends_with(&suffix)
-                                    && np.starts_with(&format!("{}::", prefix))
-                                    && np.matches("::").count()
-                                        == prefix.matches("::").count() + 2
-                            })
-                            .cloned()
-                            .collect()
-                    }
-                } else {
-                    // Root recipe — find direct child module recipes matching *::{dep_name}
-                    all_keys
-                        .iter()
-                        .filter(|np| {
-                            np.ends_with(&suffix)
-                                && np.matches("::").count() == 1
-                        })
-                        .cloned()
-                        .collect()
-                };
+            // Fallback: heuristic resolution without source file.
+            // Group ALL deps by short name to handle duplicates (even non-consecutive).
+            let mut dep_indices_by_name: HashMap<String, Vec<usize>> = HashMap::new();
+            for (idx, dep) in recipe.dependencies.iter().enumerate() {
+                dep_indices_by_name
+                    .entry(dep.recipe.clone())
+                    .or_default()
+                    .push(idx);
+            }
 
-                if candidates.len() == count {
-                    // Perfect match: N duplicate deps → N distinct module recipes
-                    for candidate in candidates {
-                        let mut dep = recipe.dependencies[i].clone();
-                        dep.recipe = candidate;
-                        new_deps.push(dep);
-                    }
-                } else if candidates.len() == 1 && count == 1 {
-                    // Single candidate for single dep
-                    let mut dep = recipe.dependencies[i].clone();
-                    dep.recipe = candidates[0].clone();
-                    new_deps.push(dep);
-                } else {
-                    // Ambiguous or no candidates — try source file disambiguation
-                    let prefix = if recipe.namepath.contains("::") {
-                        recipe.namepath.rsplitn(2, "::").nth(1).unwrap_or("")
-                    } else {
-                        ""
-                    };
-                    let source_path = source_paths.get(prefix);
-                    let source_deps =
-                        source_path.and_then(|p| Self::parse_deps_from_source(p, &recipe.name));
-
-                    if let Some(qualified_deps) = source_deps {
-                        // Find all source deps that correspond to dep_name (by short or qualified name)
-                        let matching_source_deps: Vec<&String> = qualified_deps
-                            .iter()
-                            .filter(|sd| {
-                                let dn = &recipe.dependencies[i].recipe;
-                                *sd == dn || sd.ends_with(&format!("::{}", dn))
-                            })
-                            .collect();
-
-                        if matching_source_deps.len() == count {
-                            for sd in matching_source_deps {
-                                let mut dep = recipe.dependencies[i].clone();
-                                // Resolve source dep to a full namepath
-                                if sd.contains("::") {
-                                    // Qualified relative to the module, e.g. "wasm::build-debug"
-                                    dep.recipe = if prefix.is_empty() {
-                                        sd.clone()
-                                    } else {
-                                        format!("{}::{}", prefix, sd)
-                                    };
-                                } else {
-                                    dep.recipe = sd.clone();
-                                }
-                                new_deps.push(dep);
-                            }
-                        } else {
-                            // Still can't resolve — keep original
-                            for j in 0..count {
-                                new_deps.push(recipe.dependencies[i + j].clone());
-                            }
-                        }
-                    } else {
-                        // No source file or couldn't parse — keep original
-                        for j in 0..count {
-                            new_deps.push(recipe.dependencies[i + j].clone());
-                        }
+            for (dep_name, indices) in &dep_indices_by_name {
+                // Skip if already resolved (exact match, not self-referential, no ambiguity)
+                if indices.len() == 1 && all_keys.contains(dep_name) && *dep_name != recipe.namepath
+                {
+                    let suffix = format!("::{}", dep_name);
+                    if !all_keys.iter().any(|k| k.ends_with(&suffix)) {
+                        continue; // unambiguous exact match
                     }
                 }
 
-                i += count;
-            }
+                let candidates = Self::find_candidates(dep_name, prefix, &all_keys);
 
-            recipe.dependencies = new_deps;
+                if candidates.len() == indices.len() {
+                    // N deps → N distinct candidates
+                    for (idx, candidate) in indices.iter().zip(candidates.iter()) {
+                        recipe.dependencies[*idx].recipe = candidate.clone();
+                    }
+                } else if candidates.len() == 1 && indices.len() == 1 {
+                    recipe.dependencies[indices[0]].recipe = candidates[0].clone();
+                }
+                // else: can't resolve — leave original (will error later with clear message)
+            }
         }
     }
 
@@ -299,6 +250,51 @@ impl JustDump {
             }
         }
         None
+    }
+
+    /// Find candidate namepaths for a short dep name within a module scope.
+    /// Checks siblings first, then direct child modules.
+    fn find_candidates(dep_name: &str, prefix: &str, all_keys: &[String]) -> Vec<String> {
+        let suffix = format!("::{}", dep_name);
+        if !prefix.is_empty() {
+            // Module recipe — try sibling first
+            let sibling = format!("{}{}", prefix, suffix);
+            if all_keys.contains(&sibling) {
+                return vec![sibling];
+            }
+            // Search direct child modules: {prefix}::*::{dep_name}
+            all_keys
+                .iter()
+                .filter(|np| {
+                    np.ends_with(&suffix)
+                        && np.starts_with(&format!("{}::", prefix))
+                        && np.matches("::").count() == prefix.matches("::").count() + 2
+                })
+                .cloned()
+                .collect()
+        } else {
+            // Root recipe — find direct child module recipes matching *::{dep_name}
+            all_keys
+                .iter()
+                .filter(|np| np.ends_with(&suffix) && np.matches("::").count() == 1)
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// Resolve a single dep name using sibling/child heuristic. Returns the
+    /// resolved namepath if exactly one candidate is found.
+    fn resolve_dep_heuristic(
+        dep_name: &str,
+        prefix: &str,
+        all_keys: &[String],
+    ) -> Option<String> {
+        let candidates = Self::find_candidates(dep_name, prefix, all_keys);
+        if candidates.len() == 1 {
+            Some(candidates.into_iter().next().unwrap())
+        } else {
+            None
+        }
     }
 
     /// Recursively collect all recipes from a modules map, returning them as a flat list.
@@ -870,6 +866,79 @@ mod tests {
             recipe.dependencies[0].recipe,
             "app::wasm::build-debug",
             "dep should resolve to app::wasm::build-debug via source file disambiguation"
+        );
+    }
+
+    /// Non-consecutive duplicate deps interleaved with other dep names must all
+    /// resolve correctly via source file positional matching. This mirrors the
+    /// jott-app pattern where root `check` depends on `browser-engine::check`,
+    /// `core::check`, ..., `app-check`, ..., `tauri::check` — the JSON loses
+    /// module qualifiers and produces `["check", "check", ..., "app-check", ..., "check"]`.
+    #[test]
+    fn test_source_resolution_non_consecutive_duplicate_deps() {
+        use std::io::Write;
+
+        let mut source_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            source_file,
+            "check: core::check app-check sync::check"
+        )
+        .unwrap();
+        let source_path = source_file.path().to_str().unwrap().to_string();
+
+        let json = format!(
+            r#"{{
+            "first": "check",
+            "source": {source_path_json},
+            "modules": {{
+                "core": {{
+                    "first": "check", "modules": {{}},
+                    "recipes": {{
+                        "check": {{
+                            "name": "check", "namepath": "core::check",
+                            "dependencies": [], "parameters": [], "private": false
+                        }}
+                    }}
+                }},
+                "sync": {{
+                    "first": "check", "modules": {{}},
+                    "recipes": {{
+                        "check": {{
+                            "name": "check", "namepath": "sync::check",
+                            "dependencies": [], "parameters": [], "private": false
+                        }}
+                    }}
+                }}
+            }},
+            "recipes": {{
+                "check": {{
+                    "name": "check", "namepath": "check",
+                    "dependencies": [
+                        {{"recipe": "check", "arguments": []}},
+                        {{"recipe": "app-check", "arguments": []}},
+                        {{"recipe": "check", "arguments": []}}
+                    ],
+                    "parameters": [], "private": false
+                }},
+                "app-check": {{
+                    "name": "app-check", "namepath": "app-check",
+                    "dependencies": [], "parameters": [], "private": false
+                }}
+            }}
+        }}"#,
+            source_path_json = serde_json::to_string(&source_path).unwrap(),
+        );
+
+        let mut dump: JustDump = serde_json::from_str(&json).unwrap();
+        dump.flatten_modules();
+
+        let check = dump.get_recipe("check").unwrap();
+        let dep_names: Vec<&str> = check.dependencies.iter().map(|d| d.recipe.as_str()).collect();
+
+        assert_eq!(
+            dep_names,
+            vec!["core::check", "app-check", "sync::check"],
+            "non-consecutive duplicate 'check' deps should resolve positionally from source"
         );
     }
 
