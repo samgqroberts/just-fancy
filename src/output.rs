@@ -23,6 +23,14 @@ pub const MAX_PREVIEW_CHARS: usize = 50;
 /// Log directory for task output
 pub const LOG_DIR: &str = ".just-fancy-logs";
 
+/// Sanitize a recipe name for use as a log filename.
+///
+/// Module namepaths (e.g. `build::compile`) contain `::` which is not safe in
+/// filenames on all platforms. Replace each `::` with `--`.
+pub fn log_filename(recipe: &str) -> String {
+    recipe.replace("::", "--")
+}
+
 /// Extract a preview from an output line
 ///
 /// Strips ANSI codes and truncates to max_visible characters.
@@ -103,7 +111,7 @@ impl OutputCollector {
         let log_dir = Path::new(LOG_DIR);
         fs::create_dir_all(log_dir)?;
 
-        let log_path = log_dir.join(format!("{}.log", self.recipe_name));
+        let log_path = log_dir.join(format!("{}.log", log_filename(&self.recipe_name)));
         let mut file = File::create(&log_path)?;
 
         // Write metadata header
@@ -219,5 +227,20 @@ mod tests {
             strip_ansi("\x1b[1;31;40mbold red on black\x1b[0m"),
             "bold red on black"
         );
+    }
+
+    #[test]
+    fn test_log_filename_module_namepath() {
+        assert_eq!(log_filename("build::compile"), "build--compile");
+    }
+
+    #[test]
+    fn test_log_filename_no_change() {
+        assert_eq!(log_filename("hello"), "hello");
+    }
+
+    #[test]
+    fn test_log_filename_multiple_separators() {
+        assert_eq!(log_filename("a::b::c"), "a--b--c");
     }
 }

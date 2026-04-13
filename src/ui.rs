@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::executor::{ExecutorEvent, TaskState, TaskStatus};
-use crate::output::LOG_DIR;
+use crate::output::{log_filename, LOG_DIR};
 
 /// Plain line-based UI for non-TTY environments (CI, agents, pipes).
 ///
@@ -80,7 +80,7 @@ impl PlainUI {
                     status.recipe,
                     duration.as_secs_f64(),
                     LOG_DIR,
-                    status.recipe
+                    log_filename(&status.recipe)
                 );
             }
             TaskState::Skipped { failed_dep } => {
@@ -229,7 +229,7 @@ impl UI {
                     "FAILED in {:.1}s (see {}/{}.log)",
                     duration.as_secs_f64(),
                     LOG_DIR,
-                    status.recipe
+                    log_filename(&status.recipe)
                 ));
             }
             TaskState::Skipped { failed_dep } => {

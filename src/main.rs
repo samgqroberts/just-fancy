@@ -60,10 +60,11 @@ async fn main() -> Result<()> {
     if args.list {
         println!("Available recipes:");
         let mut recipes: Vec<_> = dump.public_recipes().collect();
-        recipes.sort_by_key(|r| &r.name);
+        recipes.sort_by(|a, b| a.namepath.cmp(&b.namepath));
         for recipe in recipes {
+            let display_name = &recipe.namepath;
             if recipe.parameters.is_empty() {
-                println!("    {}", recipe.name);
+                println!("    {}", display_name);
             } else {
                 let params: Vec<_> = recipe
                     .parameters
@@ -76,7 +77,7 @@ async fn main() -> Result<()> {
                         }
                     })
                     .collect();
-                println!("    {} {}", recipe.name, params.join(" "));
+                println!("    {} {}", display_name, params.join(" "));
             }
         }
         return Ok(());
